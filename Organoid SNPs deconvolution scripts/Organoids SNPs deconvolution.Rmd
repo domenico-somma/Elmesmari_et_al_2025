@@ -1,0 +1,590 @@
+---
+title: "Organoid Myeloid integration and SNPs"
+---
+
+# Analysis of myeloid cells in organoid cultures with genetic donor deconvolution
+# This analysis:
+# 1. Processes single-cell RNA-seq data from BD Rhapsody platform
+# 2. Uses souporcell for genetic donor assignment via SNP analysis
+# 3. Characterizes myeloid cell populations across different organoid experiments
+# 4. Links cell phenotypes to donor-specific precursors
+
+#Load
+
+```{r}
+library(unixtools)
+set.tempdir("/datastore/Dom/temporary/")
+ulimit::memory_limit(75000)
+
+library(ggplot2)
+library(harmony)
+library(Seurat)
+library(patchwork)
+library(clustree)
+library(SeuratWrappers)
+library(Nebulosa)
+library(dsb)
+library(dplyr)
+library(DoubletFinder)
+
+source("/datastore/Dom/commonFunctions.R")
+```
+
+```{r}
+Organoids = readRDS("/datastore/Dom/Organoids/Organoids_integrated.rds")
+Organoids
+```
+
+```{r}
+DimPlot(Organoids)
+Organoids$Experiment = "Organoids"
+table(Organoids$Experiment)
+table(Organoids$Origin)
+Organoids$Tissue = Organoids$Origin
+Organoids$Tissue = plyr::revalue(Organoids$Tissue, c("Blood"="PB"))
+table(Organoids$Tissue)
+Organoids$platform = "BD.rhapsody"
+table(Organoids$platform)
+Organoids$Unique_ID = paste(Organoids$orig.ident, Organoids$Sample_Name, sep = "_")
+table(Organoids$Unique_ID)
+Idents(Organoids) <- "celltype"
+
+DimPlot(Organoids, group.by = "Tissue")
+DimPlot(Organoids, group.by = "platform")
+DimPlot(Organoids, split.by = "Experiment", ncol = 3)
+```
+
+##Leave only CD45+
+
+```{r}
+Organoids = subset(Organoids, idents=c("HUVEC","FLs"), invert=TRUE)
+DimPlot(Organoids)
+
+DimPlot(Organoids, label = TRUE, raster=FALSE)
+DimPlot(Organoids, group.by = "Tissue")
+DimPlot(Organoids, group.by = "platform")
+DimPlot(Organoids, split.by = "Experiment", ncol = 3)
+```
+
+## Myeloid cycling
+
+```{r}
+cycling <- subset(Organoids, idents="Cycling")
+cycling
+```
+
+```{r}
+#Continue with typical preprocessing pipeline
+cycling <- FindVariableFeatures(cycling, selection.method = "vst", nfeatures = 2000)
+cycling <- ScaleData(cycling)
+cycling <- RunPCA(cycling)
+
+cycling <- cycling %>% 
+    RunHarmony(group.by.vars=c("Unique_ID","Tissue"), plot_convergence = TRUE, theta=c(2,0))
+#Run UMAP and clustering 
+cycling <- RunUMAP(object = cycling, reduction = "harmony", dims = 1:40)
+cycling <- FindNeighbors(object = cycling, reduction = "harmony", dims = 1:40)
+cycling <- FindClusters(cycling, res=0.6)
+```
+
+```{r, fig.height=8}
+#UMAPPlot(cycling, pt.size=1, label=TRUE) + theme_powerpoint( )+ theme(axis.text=element_text(size=15),axis.title=element_text(size=20))
+DimPlot(cycling)
+cycling.cluster.markers <- FindAllMarkers(cycling, only.pos=TRUE, test.use="MAST", min.pct=0.4)
+
+cycling.cluster.markers <- cycling.cluster.markers[which(cycling.cluster.markers$p_val_adj<0.05),]
+top10 <- cycling.cluster.markers %>%
+    group_by(cluster) %>%
+    slice_max(n = 10, order_by = avg_log2FC)
+
+DoHeatmap(cycling, features=unique(top10$gene)) + NoLegend()
+```
+
+```{r, fig.width=8}
+FeaturePlot(cycling, c("SPP1","CD1C","CD3E","CD63","CD44"), order = TRUE)
+```
+
+```{r}
+View(cycling.cluster.markers)
+```
+
+```{r}
+to_remove <- subset(cycling, idents=c("0"), invert=TRUE)
+DimPlot(to_remove)
+
+#Remove cycling cells identified as not of myeloid origin
+Organoids <- subset(Organoids, cells=Cells(to_remove), invert=TRUE)
+DimPlot(Organoids,label = TRUE, repel = TRUE)
+```
+
+```{r, fig.width=12}
+Myeloid = subset(Organoids, idents = c("Classic Mo","Cycling","CD16+","Dcs","Macrophage"))
+#DimPlot(Myeloid, group.by = "celltype", label = TRUE, repel = TRUE)
+table(Myeloid$celltype)
+table(Myeloid$Unique_ID)
+unique(Myeloid$Experiment)
+```
+
+```{r}
+DimPlot(Myeloid, group.by = "Tissue")
+Idents(Myeloid) = "Experiment"
+```
+
+# SNPs
+
+We know some cells are contaminant of the donors, so we need to remove it before to proceed
+
+## Get barcode for SNPs deconvolution
+
+```{r}
+table(Myeloid$Origin)
+table(Myeloid$Unique_ID)
+```
+
+```{r}
+Idents(Myeloid) <- "Unique_ID"
+```
+
+```{r}
+O1.for.barcode = subset(Myeloid, idents = c("O1_CD45_O1", "O1_CD45_O2", "O1_CD45_O4", "O1_PB_HD1_A", "O1_PB_HD2_C", "O1_PB_HD3_ML" ,"O1_PB_HD4_MS"))
+O1.barcode = colnames(O1.for.barcode)
+O1.barcode = as.data.frame(stringr::str_split_fixed(O1.barcode,"_",n=2))$V1
+write.csv(O1.barcode, "/datastore/Dom/souporcell_datasets/BD_rhapsody_datasets/Organoids/O1_barcode.csv",row.names = FALSE,col.names = NULL)
+#write.csv(as.data.frame(O1.for.barcode@assays$RNA), "/datastore/Dom/souporcell_datasets/BD_rhapsody_datasets/Organoids/O1_RSEC.csv")
+
+O2.for.barcode = subset(Myeloid, idents = c("O2_CD45_O1","O2_CD45_O2","O2_CD45_O4"))
+O2.barcode = colnames(O2.for.barcode)
+O2.barcode = as.data.frame(stringr::str_split_fixed(O2.barcode,"_",n=2))$V1
+write.csv(O2.barcode, "/datastore/Dom/souporcell_datasets/BD_rhapsody_datasets/Organoids/O2_barcode.csv",row.names = FALSE,col.names = NULL)
+#write.csv(as.data.frame(O1.for.barcode@assays$RNA), "/datastore/Dom/souporcell_datasets/BD_rhapsody_datasets/Organoids/O1_RSEC.csv")
+
+O3.for.barcode = subset(Myeloid, idents = c("O3_PB_HD1_A","O3_PB_HD2_C","O3_PB_HD3_ML", "O3_PB_HD4_MS"))
+O3.barcode = colnames(O3.for.barcode)
+O3.barcode = as.data.frame(stringr::str_split_fixed(O3.barcode,"_",n=2))$V1
+write.csv(O3.barcode, "/datastore/Dom/souporcell_datasets/BD_rhapsody_datasets/Organoids/O3_barcode.csv",row.names = FALSE,col.names = NULL)
+```
+
+## SNP info add
+
+SNPs info are obtained using souporcell (see rest of the scripts)
+
+### O1 (n5 SNPs donors present)
+
+There are 4 donors + some CD45+ cells present from the healthy
+prepare SNPs metadata:
+
+```{r}
+O1.SNPs = read.csv("/datastore/Dom/souporcell_datasets/BD_rhapsody_datasets/Organoids/O1/clusters.tsv", sep = "\t", row.names = 2)
+O1.SNPs$X_barcode = rownames(O1.SNPs)
+head(O1.SNPs)
+O1.SNPs.10X = read.csv("/datastore/Dom/souporcell_datasets/BD_rhapsody_datasets/Organoids/O1/BD_10X_barcodes.csv", sep = "\t", header = FALSE, row.names = 2)
+O1.SNPs.10X$BD_barcode = O1.SNPs.10X$V1
+O1.SNPs.10X$V1 = NULL
+O1.SNPs.10X$X_barcode = rownames(O1.SNPs.10X)
+head(O1.SNPs.10X)
+```
+
+```{r}
+nrow(O1.SNPs)
+nrow(O1.SNPs.10X)
+
+library(dplyr)
+O1.SNP.ready = left_join(O1.SNPs, O1.SNPs.10X, by="X_barcode")
+rownames(O1.SNP.ready) <- paste0(O1.SNP.ready$BD_barcode,"_1")
+O1.SNP.ready$barcode <- NULL
+O1.SNP.ready = O1.SNP.ready[,1:2]
+head(O1.SNP.ready)
+```
+
+```{r, fig.width=15}
+Myeloid = AddMetaData(Myeloid, O1.SNP.ready)
+table(Myeloid$Unique_ID)
+table(Myeloid$assignment)
+table(Myeloid$Unique_ID, Myeloid$assignment)
+Myeloid
+DimPlot(Myeloid, split.by = "Unique_ID", group.by = "assignment", ncol = 4)
+```
+SNPs 1 is extra donor.
+remove doublets and CD45+ from healthy
+
+```{r}
+Idents(Myeloid) <- "assignment"
+table(Myeloid$assignment)
+to_remove = subset(Myeloid, idents = c("1","0/1","0/3","0/4", "1/3","2/1","3/1","3/2","4/3"))
+to_remove
+Idents(Myeloid) <- "seurat_clusters"
+table(Myeloid$Unique_ID, Myeloid$assignment)
+Myeloid = subset(Myeloid, cells = Cells(to_remove), invert=TRUE)
+Myeloid
+```
+
+```{r, fig.width=15}
+DimPlot(Myeloid, split.by = "Unique_ID", group.by = "assignment", ncol = 4)
+```
+
+#### O1 precursors
+
+```{r}
+Idents(Myeloid) <- "Unique_ID"
+O1.ann = subset(Myeloid, idents = c("O1_CD45_O1", "O1_CD45_O2", "O1_CD45_O4"))
+DimPlot(O1.ann)
+```
+
+```{r}
+O1.newmeta=O1.ann@meta.data
+O1.newmeta$SNP_uniqueID = paste(O1.ann$Unique_ID, O1.ann$assignment, sep = "_SNPs")
+O1.ann = AddMetaData(O1.ann, O1.newmeta["SNP_uniqueID"])
+table(O1.ann$SNP_uniqueID)
+Idents(O1.ann)="SNP_uniqueID"
+
+O1.ann = subset(O1.ann, idents = c("O1_CD45_O1_SNPsNA","O1_CD45_O2_SNPsNA","O1_CD45_O4_SNPsNA"), invert=TRUE)
+table(O1.ann$SNP_uniqueID)
+O1.newmeta=O1.ann@meta.data
+```
+
+```{r}
+table(O1.ann$celltype)
+table(Myeloid$celltype)
+```
+
+```{r}
+#SNPs_donor = read.csv("SNPs_Organoid_deconvoluted.csv", sep = ",", row.names = 1)
+#SNPs_donor
+```
+
+```{r}
+#unique(O1.ann$SNP_uniqueID)
+#Idents(O1.ann) <- "SNP_uniqueID"
+#O1.ann = make.add.meta(O1.ann, SNPs_donor)
+```
+
+```{r, fig.width=10}
+#DimPlot(O1.ann, group.by = "Precursors")
+#ProportionPlot(O1.ann, name1 = "Precursors", name2 = "celltype")
+```
+
+### O3 (n4 SNPs donors present)
+
+prepare SNPs metadata:
+
+```{r}
+O3.SNPs = read.csv("/datastore/Dom/souporcell_datasets/BD_rhapsody_datasets/Organoids/O3/clusters.tsv", sep = "\t", row.names = 2)
+O3.SNPs$X_barcode = rownames(O3.SNPs)
+head(O3.SNPs)
+O3.SNPs.10X = read.csv("/datastore/Dom/souporcell_datasets/BD_rhapsody_datasets/Organoids/O3/BD_10X_barcodes.csv", sep = "\t", header = FALSE, row.names = 2)
+O3.SNPs.10X$BD_barcode = O3.SNPs.10X$V1
+O3.SNPs.10X$V1 = NULL
+O3.SNPs.10X$X_barcode = rownames(O3.SNPs.10X)
+head(O3.SNPs.10X)
+```
+
+```{r}
+nrow(O3.SNPs)
+nrow(O3.SNPs.10X)
+
+library(dplyr)
+O3.SNP.ready = left_join(O3.SNPs, O3.SNPs.10X, by="X_barcode")
+rownames(O3.SNP.ready) <- paste0(O3.SNP.ready$BD_barcode,"_3")
+O3.SNP.ready$barcode <- NULL
+O3.SNP.ready = O3.SNP.ready[,1:2]
+head(O3.SNP.ready)
+```
+
+```{r, fig.width=15}
+Myeloid = AddMetaData(Myeloid, O3.SNP.ready)
+table(Myeloid$Unique_ID)
+table(Myeloid$assignment)
+table(Myeloid$Unique_ID, Myeloid$assignment)
+Myeloid
+DimPlot(Myeloid, split.by = "Unique_ID", group.by = "assignment", ncol = 4)
+```
+
+### O2 (n4 SNPs donors present)
+
+prepare SNPs metadata:
+
+```{r}
+O2.SNPs = read.csv("/datastore/Dom/souporcell_datasets/BD_rhapsody_datasets/Organoids/O2/clusters.tsv", sep = "\t", row.names = 2)
+O2.SNPs$X_barcode = rownames(O2.SNPs)
+head(O2.SNPs)
+O2.SNPs.10X = read.csv("/datastore/Dom/souporcell_datasets/BD_rhapsody_datasets/Organoids/O2/BD_10X_barcodes.csv", sep = "\t", header = FALSE, row.names = 2)
+O2.SNPs.10X$BD_barcode = O2.SNPs.10X$V1
+O2.SNPs.10X$V1 = NULL
+O2.SNPs.10X$X_barcode = rownames(O2.SNPs.10X)
+head(O2.SNPs.10X)
+```
+
+```{r}
+nrow(O2.SNPs)
+nrow(O2.SNPs.10X)
+
+library(dplyr)
+O2.SNP.ready = left_join(O2.SNPs, O2.SNPs.10X, by="X_barcode")
+rownames(O2.SNP.ready) <- paste0(O2.SNP.ready$BD_barcode,"_2")
+O2.SNP.ready$barcode <- NULL
+O2.SNP.ready = O2.SNP.ready[,1:2]
+head(O2.SNP.ready)
+```
+
+```{r, fig.width=15}
+Myeloid = AddMetaData(Myeloid, O2.SNP.ready)
+table(Myeloid$Unique_ID)
+table(Myeloid$assignment)
+table(Myeloid$Unique_ID, Myeloid$assignment)
+Myeloid
+DimPlot(Myeloid, split.by = "Unique_ID", group.by = "assignment", ncol = 4)
+```
+
+Remove doublets
+
+```{r}
+Idents(Myeloid) <- "assignment"
+table(Myeloid$assignment)
+to_remove = subset(Myeloid, idents = c("0/2","1/0","1/3","2/0", "3/1","3/2"))
+to_remove
+Idents(Myeloid) <- "seurat_clusters"
+table(Myeloid$Unique_ID, Myeloid$assignment)
+Myeloid = subset(Myeloid, cells = Cells(to_remove), invert=TRUE)
+Myeloid
+```
+
+```{r, fig.width=15}
+DimPlot(Myeloid, split.by = "Unique_ID", group.by = "assignment", ncol = 4)
+```
+
+#### O2 precursors
+
+```{r}
+Idents(Myeloid) <- "Unique_ID"
+O2.ann = subset(Myeloid, idents = c("O2_CD45_O1", "O2_CD45_O2", "O2_CD45_O4"))
+DimPlot(O2.ann, group.by = "assignment")
+```
+
+```{r}
+O2.newmeta=O2.ann@meta.data
+O2.newmeta$SNP_uniqueID = paste(O2.ann$Unique_ID, O2.ann$assignment, sep = "_SNPs")
+O2.ann = AddMetaData(O2.ann, O2.newmeta["SNP_uniqueID"])
+table(O2.ann$SNP_uniqueID)
+Idents(O2.ann)="SNP_uniqueID"
+
+O2.ann = subset(O2.ann, idents = c("O2_CD45_O1_SNPsNA","O2_CD45_O2_SNPsNA","O2_CD45_O4_SNPsNA"), invert=TRUE)
+table(O2.ann$SNP_uniqueID)
+O2.newmeta=O2.ann@meta.data
+```
+
+```{r}
+table(O2.ann$celltype)
+table(Myeloid$celltype)
+```
+
+###Merge the two meta and add
+
+```{r}
+newmeta = rbind(O1.newmeta, O2.newmeta)
+newmeta$pANN_0.25_0.09_135 <- NULL
+newmeta$pANN_0.25_0.22_29 <- NULL
+newmeta$pANN_0.25_0.28_305 <- NULL
+```
+
+```{r}
+nrow(newmeta)
+nrow(Myeloid)
+table(Myeloid$Tissue)
+```
+
+```{r}
+Idents(Myeloid) <- "Tissue"
+Myeloid.no.PB = subset(Myeloid, idents = "Organoid")
+```
+
+```{r}
+table(Myeloid.no.PB$orig.ident)
+Myeloid.no.PB = AddMetaData(Myeloid.no.PB,newmeta)
+```
+
+```{r}
+table(Myeloid.no.PB$SNP_uniqueID)
+Idents(Myeloid.no.PB) <- "SNP_uniqueID"
+DimPlot(Myeloid.no.PB)
+```
+
+
+```{r}
+SNPs_donor = read.csv("SNPs_Organoid_deconvoluted.csv", sep = ",", row.names = 1)
+SNPs_donor
+```
+
+#Annotation organoid myeloid cells
+
+```{r}
+rownames(SNPs_donor)
+unique(Myeloid.no.PB$SNP_uniqueID)
+setdiff(rownames(SNPs_donor), unique(Myeloid.no.PB$SNP_uniqueID))
+setdiff(unique(Myeloid.no.PB$SNP_uniqueID), rownames(SNPs_donor))
+```
+
+```{r}
+length(Myeloid.no.PB$SNP_uniqueID)
+length(Myeloid.no.PB$SNP_uniqueID[is.na(Myeloid.no.PB$SNP_uniqueID)])
+to_remove = names(Myeloid.no.PB$SNP_uniqueID[is.na(Myeloid.no.PB$SNP_uniqueID)])
+```
+
+```{r}
+Myeloid.no.PB = subset(Myeloid.no.PB, cells = to_remove, invert=TRUE)
+```
+
+```{r}
+Myeloid.no.PB = make.add.meta(Myeloid.no.PB, SNPs_donor)
+```
+
+```{r}
+DimPlot(Myeloid.no.PB, group.by = "Precursors", ncol = 3)
+```
+
+```{r}
+ProportionPlot(Myeloid.no.PB, "Precursors", "celltype")
+```
+
+```{r}
+#Continue with typical preprocessing pipeline
+Myeloid.no.PB <- Myeloid.no.PB %>%
+    NormalizeData() %>%
+    FindVariableFeatures(selection.method = "vst", nfeatures = 2000) %>% 
+    ScaleData() %>% RunPCA(npcs = 40)
+ElbowPlot(object = Myeloid.no.PB, ndims  = 40)
+```
+
+```{r}
+#Harmonize
+Myeloid.no.PB <- Myeloid.no.PB %>% 
+    RunHarmony(group.by.vars="Unique_ID", plot_convergence = TRUE, theta=0)
+
+```
+
+```{r}
+Myeloid.no.PB <- RunUMAP(object = Myeloid.no.PB, reduction = "harmony", dims = 1:25)
+FeaturePlot(Myeloid.no.PB, c("CD1C","BIRC5"))
+DimPlot(Myeloid.no.PB, group.by = "Precursors")
+```
+
+```{r}
+Myeloid.no.PB <- FindNeighbors(Myeloid.no.PB, reduction = "harmony", dims = 1:25)
+```
+
+
+```{r}
+#Helps to understand how many cluster may be there
+
+#make a copy:
+Seurat.Object.copy = Myeloid.no.PB
+
+#Check different cluster resolutions
+#It generates new metadata slots starting with "integrated_snn_res."
+Seurat.Object.copy <- FindClusters(Seurat.Object.copy, resolution = 0.1)
+Seurat.Object.copy <- FindClusters(Seurat.Object.copy, resolution = 0.2)
+Seurat.Object.copy <- FindClusters(Seurat.Object.copy, resolution = 0.3)
+Seurat.Object.copy <- FindClusters(Seurat.Object.copy, resolution = 0.4)
+Seurat.Object.copy <- FindClusters(Seurat.Object.copy, resolution = 0.5)
+Seurat.Object.copy <- FindClusters(Seurat.Object.copy, resolution = 0.6)
+Seurat.Object.copy <- FindClusters(Seurat.Object.copy, resolution = 0.7)
+Seurat.Object.copy <- FindClusters(Seurat.Object.copy, resolution = 0.8)
+Seurat.Object.copy <- FindClusters(Seurat.Object.copy, resolution = 0.9)
+Seurat.Object.copy <- FindClusters(Seurat.Object.copy, resolution = 1)
+```
+
+```{r}
+clustree(Seurat.Object.copy, prefix = "RNA_snn_res.")
+```
+
+```{r}
+Myeloid.no.PB <- FindClusters(Myeloid.no.PB, res=0.6)
+```
+
+```{r, fig.width=10}
+DimPlot(Myeloid.no.PB, label = TRUE)
+DimPlot(Myeloid.no.PB, group.by = "seurat_clusters", split.by = "Precursors", ncol = 3)
+```
+
+```{r, fig.width=12}
+FeaturePlot(Myeloid.no.PB, c("CD1C","CLEC10A","TNF","SPP1","BIRC5","FCGR3A","LYVE1","FOLR2","ICAM1","TREM2","APOE","VSIG4"), ncol = 3, order=TRUE)
+VlnPlot.median(Myeloid.no.PB, c("S100A12","CD1C","CLEC10A","CD14","TNF","SPP1","BIRC5","FCGR3A","LYVE1","FOLR2","ICAM1","TREM2","APOE","VSIG4", "FUCA1","HLA-DRB5"), legend = FALSE)
+```
+
+```{r}
+Myeloid.no.PB@misc$markers = FindAllMarkers(Myeloid.no.PB, test.use = "MAST", min.pct = 0.4)
+```
+
+```{r, fig.height=16}
+Idents(Myeloid.no.PB) <- "seurat_clusters"
+top.genes <- Myeloid.no.PB@misc$markers %>% group_by(cluster) %>% top_n(n = 15, wt = avg_log2FC)
+DoHeatmap(Myeloid.no.PB, features = top.genes$gene) + NoLegend()
+```
+
+
+```{r, fig.width=10}
+Myeloid.no.PB$celltype <- plyr::revalue(as.character(Myeloid.no.PB$seurat_clusters),
+                                        c("6"="cDC CD1c+",
+                                          "7"="BIRC5+ M",
+                                          "8"="BIRC5+ M",
+                                          "4"="Cytokines prod M",
+                                          "1"="TREM2low SPP1+ APOE+ M",
+                                          "3"="CLEC10A+ IFITM+ NR4A1+ M",
+                                          "5"="CLEC10A+ SPP1+ VSIG4+ TREM2high M",
+                                          "2"="VSIG4+ M",
+                                          "0"="MHCIIhigh M"))
+Idents(Myeloid.no.PB) <- "celltype"
+DimPlot(Myeloid.no.PB, label = TRUE)
+```
+
+```{r, fig.width=10}
+DimPlot(Myeloid.no.PB, label = TRUE) + NoLegend()
+DimPlot(Myeloid.no.PB, split.by = "orig.ident")
+DimPlot(Myeloid.no.PB, split.by = "DonorN")
+DimPlot(Myeloid.no.PB, split.by = "Precursors", ncol = 2)
+DimPlot(Myeloid.no.PB, split.by = "DonorN", group.by = "Precursors")
+```
+
+```{r, fig.width=20}
+ProportionPlot(Myeloid.no.PB, "Precursors", "DonorN")
+ProportionPlot(Myeloid.no.PB, "Precursors", "celltype")
+```
+
+```{r, fig.width=10}
+Idents(Myeloid.no.PB) <- "Precursors"
+DC2.Myeloid.no.PB <- subset(Myeloid.no.PB, idents = "DC2")
+DimPlot(DC2.Myeloid.no.PB, split.by = "DonorN", group.by = "celltype")
+```
+
+```{r, fig.width=10}
+Idents(Myeloid.no.PB) <- "Precursors"
+Mono.Myeloid.no.PB <- subset(Myeloid.no.PB, idents = "Monocytes")
+DimPlot(Mono.Myeloid.no.PB, split.by = "DonorN", group.by = "celltype")
+```
+
+```{r, fig.width=10}
+Idents(Myeloid.no.PB) <- "Precursors"
+DC3.Myeloid.no.PB <- subset(Myeloid.no.PB, idents = "DC3")
+DimPlot(DC3.Myeloid.no.PB, split.by = "DonorN", group.by = "celltype")
+```
+
+```{r, fig.width=10}
+Idents(Myeloid.no.PB) <- "Precursors"
+iDC3.Myeloid.no.PB <- subset(Myeloid.no.PB, idents = "iDC3")
+DimPlot(iDC3.Myeloid.no.PB, split.by = "DonorN", group.by = "celltype")
+```
+
+```{r, fig.width=10}
+FeaturePlot(Myeloid.no.PB, c("AXL","CD1C", "CLEC10A","CCR7"))
+```
+
+
+```{r}
+Idents(Myeloid.no.PB) <- "seurat_clusters"
+Myeloid.no.PB@misc$markers.1vs5 = FindMarkers(Myeloid.no.PB, ident.1 = "1",ident.2 = "5", test.use = "MAST", min.pct = 0.4)
+```
+
+```{r, fig.width=15}
+VlnPlot.median(Myeloid.no.PB, c("S100A12","CD1C","CLEC10A","CD14","TNF","SPP1","BIRC5","FCGR3A","LYVE1","FOLR2","ICAM1","TREM2","APOE","IL7R","VSIG4", "FUCA1"), legend = FALSE)
+```
+
+(Continue integrating with ST)
