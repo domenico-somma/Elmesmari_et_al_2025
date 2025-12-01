@@ -1,0 +1,366 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Load
+
+```{r}
+# Set up temporary directory and memory limits for processing
+library(unixtools)
+set.tempdir("/datastore3/Dom/temporary/")
+ulimit::memory_limit(150000)
+
+# Load required packages for single-cell analysis
+library(ggplot2)
+library(harmony)
+library(Seurat)
+library(patchwork)
+library(clustree)
+library(SeuratWrappers)
+library(Nebulosa)
+library(dplyr)
+library(STACAS)
+
+# Load custom functions for Seurat analysis
+source("/data/Dom/commonFunctions_SeuratV5.R")
+```
+
+## Organoid
+
+```{r}
+# Load pre-processed Seurat objects for different organoid libraries
+C1.macro = readRDS("/datastore3/Dom/Saved/Jan25_Organoid/Library1_SMK_no_intro_Seurat.rds")
+C2.FLS = readRDS("/datastore3/Dom/Saved/Jan25_Organoid/Library2_SMK_no_intro_Seurat.rds")
+```
+
+```{r, fig.width=10}
+# Visualize the initial datasets to understand cell type distribution and sample composition
+DimPlot(C1.macro, reduction = "umap", group.by = c("Cell_Type_Experimental","Sample_Name"))
+DimPlot(C1.macro, split.by = "Sample_Name")
+```
+
+### QC
+
+#### Myeloid
+
+```{r, fig.width=10}
+# Set identities and perform quality control on C1.macro dataset
+Idents(C1.macro) <- "Sample_Name"
+C1.macro = Calc.Perc.Features(C1.macro)
+# Visualize count vs feature relationship before QC
+FeatureScatter(C1.macro, "nCount_RNA", "nFeature_RNA")
+# Apply MAD-based filtering to remove outliers
+C1.macro = QC.n.mad(C1.macro, n.mad = 5)
+# Visualize count vs feature relationship after QC
+FeatureScatter(C1.macro, "nCount_RNA", "nFeature_RNA")
+# Remove multiplet and undetermined cells
+C1.macro = subset(C1.macro, idents = c("Multiplet","Undetermined"), invert=T)
+
+# Standard Seurat processing pipeline
+C1.macro = DietSeurat(C1.macro)
+C1.macro = FindVariableFeatures.STACAS(C1.macro)
+C1.macro = ScaleData(C1.macro)
+C1.macro = RunPCA(C1.macro, npcs = 50)
+# Determine significant principal components for downstream analysis
+ndim = find.significant.PCs(C1.macro)
+
+# Clustering and dimensionality reduction
+C1.macro = FindNeighbors(C1.macro, dims = 1:ndim)
+C1.macro = FindClusters(C1.macro, resolution = 0.1)
+C1.macro = RunUMAP(C1.macro, dims = 1:ndim)
+```
+
+```{r}
+# Visualize clustering results
+DimPlot(C1.macro)
+DimPlot(C1.macro, split.by = "Sample_Name")
+# Find marker genes for each cluster
+Idents(C1.macro) <- "seurat_clusters"
+C1.macro@misc$markers = FindAllMarkers(C1.macro, only.pos = T, min.pct = 0.4, logfc.threshold = 0.6)
+```
+
+```{r}
+library(dplyr)
+
+# Extract top 10 marker genes per cluster for heatmap visualization
+top10 <- C1.macro@misc$markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+C1.macro = ScaleData(C1.macro, features = rownames(C1.macro))
+DoHeatmap(C1.macro, features = top10$gene) + NoLegend()
+```
+
+Cluster2 is full collagen, identify as doublets
+
+```{r}
+# Remove collagen-rich cluster (cluster 2) from analysis
+Idents(C1.macro) <- "seurat_clusters"
+C1.macro = subset(C1.macro, idents = "2", invert=T)
+```
+
+```{r}
+# Re-run analysis pipeline after removing problematic cluster
+C1.macro = FindVariableFeatures.STACAS(C1.macro)
+C1.macro = ScaleData(C1.macro)
+C1.macro = RunPCA(C1.macro, npcs = 50)
+ndim = find.significant.PCs(C1.macro)
+
+C1.macro = FindNeighbors(C1.macro, dims = 1:ndim)
+C1.macro = FindClusters(C1.macro, resolution = 0.5)
+C1.macro = RunUMAP(C1.macro, dims = 1:ndim)
+```
+
+```{r}
+# Visualize refined clustering
+DimPlot(C1.macro, label = T)
+DimPlot(C1.macro, split.by = "Sample_Name")
+# Find marker genes for refined clusters
+Idents(C1.macro) <- "seurat_clusters"
+C1.macro@misc$markers = FindAllMarkers(C1.macro, only.pos = T, min.pct = 0.4, logfc.threshold = 0.6)
+```
+
+```{r, fig.height=5}
+# Create comprehensive heatmap with top markers
+top10 <- C1.macro@misc$markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+
+# Scale data specifically for marker genes and variable features
+feature.to.scale = c(VariableFeatures(C1.macro),unique(C1.macro@misc$markers$gene))
+feature.to.scale = unique(feature.to.scale)
+
+C1.macro = ScaleData(C1.macro, features = feature.to.scale)
+DoHeatmap(C1.macro, features = top10$gene) + NoLegend()
+# Verify collagen expression is removed
+VlnPlot(C1.macro, "COL1A1")
+```
+
+```{r}
+# Save the QC-processed datasets for future analysis
+saveRDS(C1.macro, "/data/Dom/Jan25_Organoid/C1_macro_afterQC.rds")
+```
+
+#### FLS
+
+```{r, fig.width=8}
+# Visualize initial FLS datasets to understand sample distribution
+DimPlot(C2.FLS, reduction = "umap", group.by = c("Sample_Name"))
+```
+
+```{r, fig.width=10}
+# Perform quality control and standard Seurat processing on C2.FLS dataset
+Idents(C2.FLS) <- "Sample_Name"
+C2.FLS = Calc.Perc.Features(C2.FLS)
+# Check count vs feature relationship before QC
+FeatureScatter(C2.FLS, "nCount_RNA", "nFeature_RNA")
+# Apply MAD-based outlier filtering
+C2.FLS = QC.n.mad(C2.FLS, n.mad = 5)
+# Verify QC effect on data distribution
+FeatureScatter(C2.FLS, "nCount_RNA", "nFeature_RNA")
+# Remove multiplet and undetermined cells
+C2.FLS = subset(C2.FLS, idents = c("Multiplet","Undetermined"), invert=T)
+
+# Standard Seurat processing pipeline
+C2.FLS = DietSeurat(C2.FLS)
+C2.FLS = FindVariableFeatures.STACAS(C2.FLS)
+C2.FLS = ScaleData(C2.FLS)
+C2.FLS = RunPCA(C2.FLS, npcs = 50)
+# Determine optimal number of principal components
+ndim = find.significant.PCs(C2.FLS)
+
+# Clustering and dimensionality reduction
+C2.FLS = FindNeighbors(C2.FLS, dims = 1:ndim)
+C2.FLS = FindClusters(C2.FLS, resolution = 0.1)
+C2.FLS = RunUMAP(C2.FLS, dims = 1:ndim)
+```
+
+```{r}
+# Visualize clustering results for C2.FLS
+DimPlot(C2.FLS)
+DimPlot(C2.FLS, split.by = "Sample_Name")
+# Find marker genes for each cluster
+Idents(C2.FLS) <- "seurat_clusters"
+C2.FLS@misc$markers = FindAllMarkers(C2.FLS, only.pos = T, min.pct = 0.4, logfc.threshold = 0.6)
+```
+
+```{r}
+library(dplyr)
+
+# Create heatmap with top 10 marker genes per cluster
+top10 <- C2.FLS@misc$markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+C2.FLS = ScaleData(C2.FLS, features = rownames(C2.FLS))
+DoHeatmap(C2.FLS, features = top10$gene) + NoLegend()
+```
+
+```{r}
+# Check expression of endothelial marker (VWF) and proliferation markers (MKI67, TOP2A)
+FeaturePlot(C2.FLS, c("VWF","MKI67","TOP2A"), order=T)
+```
+
+```{r}
+# Re-visualize clustering with labels
+DimPlot(C2.FLS, label = T)
+DimPlot(C2.FLS, split.by = "Sample_Name")
+# Re-run marker gene detection (possibly after manual inspection)
+Idents(C2.FLS) <- "seurat_clusters"
+C2.FLS@misc$markers = FindAllMarkers(C2.FLS, only.pos = T, min.pct = 0.4, logfc.threshold = 0.6)
+```
+
+```{r, fig.height=5}
+# Create comprehensive heatmap with scaled features
+top10 <- C2.FLS@misc$markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+
+# Scale both variable features and marker genes for heatmap
+feature.to.scale = c(VariableFeatures(C2.FLS),unique(C2.FLS@misc$markers$gene))
+feature.to.scale = unique(feature.to.scale)
+
+C2.FLS = ScaleData(C2.FLS, features = feature.to.scale)
+DoHeatmap(C2.FLS, features = top10$gene) + NoLegend()
+# Check collagen expression levels
+VlnPlot(C2.FLS, "COL1A1")
+```
+
+
+```{r}
+# Save processed dataset for future analysis
+saveRDS(C2.FLS, "/data/Dom/Jan25_Organoid/C2.FLS.rds")
+```
+
+# FLs (Eva)
+
+Experiments done in collaboration with Eva, using Synovial Fluid
+
+```{r}
+# Load Eva's myeloid dataset and update to current Seurat version
+Eva.M = readRDS("/data/Dom/Feb25_FLs_Organoid/M_SMK_Seurat.rds")
+Eva.M <- UpdateSeuratObject(Eva.M)
+```
+
+```{r}
+# Calculate percentage of mitochondrial and ribosomal features for QC
+Eva.M = Calc.Perc.Features(Eva.M)
+```
+
+```{r}
+# Set identities by sample and remove undetermined/multiplet cells
+Idents(Eva.M) <- "Sample_Name"
+Eva.M <- subset(Eva.M, idents = c("Undetermined","Multiplet"), invert=T)
+```
+
+
+```{r, fig.height=10}
+# Apply stringent QC using 5 MADs for outlier removal
+Eva.M = QC.n.mad(Eva.M, n.mad = 5)
+```
+
+```{r}
+# Visualize sequencing depth across samples
+plot.depth.seq(Eva.M, metadata.col = "Sample_Name")
+```
+
+```{r}
+# Check cell counts per sample after filtering
+table(Eva.M$Sample_Name)
+```
+
+```{r}
+# Standard Seurat processing pipeline
+Eva.M <- NormalizeData(Eva.M)
+Eva.M <- FindVariableFeatures.STACAS(Eva.M)
+Eva.M <- ScaleData(Eva.M)
+Eva.M <- RunPCA(object = Eva.M, npcs = 50)
+# Determine optimal PCA dimensions using elbow plot
+ElbowPlot(object = Eva.M, ndims  = 50)
+# Use custom function to find significant PCs
+Eva.M@misc$ndim = find.significant.PCs(Eva.M)
+# Check for batch effects by sample in PCA space
+DimPlot(Eva.M, reduction = "pca", group.by = "Sample_Name")
+```
+
+```{r}
+# Dimensionality reduction and clustering
+Eva.M <- RunUMAP(Eva.M, dims = 1:20)
+Eva.M <- FindNeighbors(Eva.M, dims = 1:Eva.M@misc$ndim)
+Eva.M <- FindClusters(Eva.M,resolution = 0.2)
+
+# Visualize clustering results
+DimPlot(Eva.M)
+DimPlot(Eva.M, group.by = "Sample_Name")
+DimPlot(Eva.M, split.by = "Sample_Name", ncol = 3)
+```
+
+```{r}
+# Find marker genes for all clusters
+Eva.M@misc$markers = FindAllMarkers(Eva.M, min.pct = 0.3, logfc.threshold = 0.6)
+```
+
+```{r, fig.height=10}
+# Create heatmap of top 10 marker genes per cluster
+top10 <- Eva.M@misc$markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+DoHeatmap(Eva.M, features = top10$gene) + NoLegend()
+```
+
+Cluster 5 is FLs contaminant - identified based on marker expression
+
+```{r}
+# Check expression of fibroblast marker (COL1A1) and myeloid markers (SPP1, SELENOP)
+VlnPlot.median(Eva.M, c("COL1A1"))
+FeaturePlot(Eva.M, c("SPP1","SELENOP"))
+```
+
+```{r, fig.width=20}
+# Visualize key markers split by sample to check distribution
+FeaturePlot(Eva.M, c("SPP1","SELENOP"), split.by = "Sample_Name")
+```
+
+```{r}
+# Save the full QC-processed dataset
+saveRDS(Eva.M, "/data/Dom/Feb25_FLs_Organoid/M_Unst_SF.rds")
+```
+
+# Conversion for scanpy - Pre integration preparation
+
+```{r}
+# Load the previously processed Eva dataset
+Eva.M = readRDS("/datastore/MKS_Data/UNpublished/Domenico_leftover/Feb25_SF_Eva_Organoid/full_analysis/M_After_QC.rds")
+
+# Clean up factor levels in Sample_Name and check distribution
+Eva.M$Sample_Name <- droplevels(Eva.M$Sample_Name)
+table(Eva.M$Sample_Name, useNA = "ifany")
+
+# Visualize clustering results before conversion
+DimPlot(Eva.M, group.by = "seurat_clusters")
+DimPlot(Eva.M, group.by = "seurat_clusters", split.by = "Sample_Name")
+```
+
+```{r}
+# Prepare metadata fields for STACAS integration and scanpy conversion
+Eva.M$STACASTissue = "Organoid"
+Eva.M$STACASExperiment = paste0("Organoid_", Eva.M$Sample_Name)
+table(Eva.M$STACASExperiment)
+# Create placeholder cluster field for STACAS (to be filled later)
+Eva.M$STACASclusters <- "toremove"
+Eva.M$STACASclusters = na_if(Eva.M$STACASclusters, "toremove")
+Eva.M$STACASsample = Eva.M$Sample_Name
+```
+
+```{r}
+# Check the final Seurat object structure
+Eva.M
+```
+
+```{r}
+# Create a minimal Seurat object with only necessary data for scanpy conversion
+Eva.M.tosave = CreateSeuratObject(Eva.M@assays$RNA@counts, meta.data = Eva.M@meta.data[,c("STACASclusters","STACASExperiment","STACASsample")])
+```
+
+```{r}
+# Export metadata for reference
+write.csv(Eva.M@meta.data[,c("orig.ident","STACASclusters","STACASExperiment","STACASsample")], "/datastore/Dom/Saved/2025_Mar_Organoid/Mar25.Eva.meta.csv")
+```
+
+```{r}
+# Convert to h5ad format for scanpy using SeuratDisk
+library(SeuratDisk)
+SaveH5Seurat(Eva.M.tosave, filename = "/datastore/Dom/Saved/2025_Mar_Organoid/Mar25.Eva.M.macro")
+Convert("/datastore/Dom/Saved/2025_Mar_Organoid/Mar25.Eva.M.macro", dest = "h5ad")
+```
+
+

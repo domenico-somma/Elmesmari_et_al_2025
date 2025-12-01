@@ -1,0 +1,21 @@
+This analysis pipeline aims to validate synovial organoid models by comparing their macrophage populations to human synovial tissue macrophages, assessing how faithfully organoids recapitulate human tissue biology.
+
+Pipeline Architecture in Four Phases
+Phase 1: R-Based Individual Dataset Processing
+The pipeline begins with quality control and preprocessing of the distinct single-cell RNA sequencing datasets. 
+Each dataset undergoes independent quality control using median absolute deviation filtering, removal of technical artifacts like collagen-rich clusters and multiplet cells, and standard Seurat processing including normalization, dimensionality reduction via PCA, clustering, and marker gene identification. 
+
+Phase 2: Data Conversion for Cross-Platform Integration
+To enable integration using Python-based scANVI, the R-processed data undergoes format standardization. 
+The Seurat objects are converted to h5ad format. This includes processing both the organoids datasets and synovial tissue datasets.
+
+Phase 3: Python-Based Multi-Dataset Integration
+In the Jupyter notebook environment, the pipeline performs integration of human tissue macrophages with organoid-derived macrophages. 
+After loading the h5ad files, the analysis identifies common genes across all datasets and filters to this shared gene set. 
+The integration employs scVI and scANVI models—neural network-based approaches that handle batch effects while preserving biological variation. 
+The scVI model provides unsupervised integration, while scANVI enables semi-supervised learning using known cell type labels. 
+The integration yields a shared latent space where human and organoid cells can be directly compared.
+
+Phase 4: R-Based Post-Integration Analysis and Visualization
+The integrated data returns to Seurat/R for biological interpretation and visualization. 
+The pipeline imports the scanpy-generated results including UMAP coordinates and cluster predictions. 
